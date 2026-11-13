@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -19,23 +19,16 @@ public class ConnectionRecord
     public string AuthType { get; set; } = "SQL Server Authentication";
     public string Username { get; set; } = "sa";
     public string Password { get; set; } = string.Empty;
-    public string DatabaseType { get; set; } = "MSSQL";
+    public DatabaseType DatabaseType { get; set; } = DatabaseType.MSSQL;
     public string LastConnectedAt { get; set; } = string.Empty;
 
-    public string DisplayTitle => DatabaseType == "SQLite"
+    public string DisplayTitle => DatabaseType == DatabaseType.SQLite
         ? (string.IsNullOrWhiteSpace(DatabaseName) || DatabaseName == "main" || DatabaseName == "master"
             ? (string.IsNullOrWhiteSpace(Path.GetFileName(Server)) || Server == "localhost" ? "SQLite DB" : Path.GetFileName(Server))
             : DatabaseName)
         : (!string.IsNullOrWhiteSpace(DatabaseName) ? DatabaseName : Server);
 
-    public string BadgeColor => DatabaseType switch
-    {
-        "MSSQL" => "#2563EB",
-        "PostgreSQL" => "#336791",
-        "MySQL" => "#00758F",
-        "SQLite" => "#003B57",
-        _ => "#4B5563"
-    };
+    public string BadgeColor => DatabaseType.GetBadgeColor();
 
     public bool IsActive { get; set; }
     public string StatusBadgeText => IsActive ? "ACTIVE" : "SAVED";
@@ -127,7 +120,7 @@ public class PanelCustomizationRecord
 
 public class TableCustomizationRecord
 {
-    public double RowHeight { get; set; } = 25.0;
+    public double RowHeight { get; set; } = 20.0;
     public double HeaderHeight { get; set; } = 26.0;
     public double GutterWidth { get; set; } = 56.0;
     public double FontSize { get; set; } = 11.0;
@@ -144,8 +137,26 @@ public class TableCustomizationRecord
     public bool ShowAlternatingRowColors { get; set; } = true;
 }
 
+internal sealed class DatabaseTypeHandler : SqlMapper.TypeHandler<DatabaseType>
+{
+    public override void SetValue(System.Data.IDbDataParameter parameter, DatabaseType value)
+    {
+        parameter.Value = value.ToDialectString();
+    }
+
+    public override DatabaseType Parse(object value)
+    {
+        return DatabaseTypeExtensions.Parse(value?.ToString());
+    }
+}
+
 public class DatabaseStorageService
 {
+    static DatabaseStorageService()
+    {
+        SqlMapper.AddTypeHandler(new DatabaseTypeHandler());
+    }
+
     private static DatabaseStorageService? _instance;
     public static DatabaseStorageService Instance => _instance ??= new DatabaseStorageService();
 
@@ -337,6 +348,16 @@ public class DatabaseStorageService
             try
             {
                 await connection.ExecuteAsync("ALTER TABLE Connections ADD COLUMN DatabaseType TEXT DEFAULT 'MSSQL';");
+            }
+            catch { }
+
+            try
+            {
+                await connection.ExecuteAsync(@"
+                    UPDATE Connections SET DatabaseType = 'PostgreSQL' WHERE UPPER(DatabaseType) IN ('POSTGRES', 'POSTGRESQL', 'PG');
+                    UPDATE Connections SET DatabaseType = 'MSSQL' WHERE UPPER(DatabaseType) IN ('MSSQL', 'SQLSERVER', 'SQL SERVER');
+                    UPDATE Connections SET DatabaseType = 'MySQL' WHERE UPPER(DatabaseType) IN ('MYSQL', 'MARIADB');
+                    UPDATE Connections SET DatabaseType = 'SQLite' WHERE UPPER(DatabaseType) = 'SQLITE';");
             }
             catch { }
 
@@ -848,13 +869,15 @@ public class DatabaseStorageService
         }
     }
 
-    public async Task<int> SaveConnectionAsync(string server, int port, string databaseName, string authType, string username, string databaseType = "MSSQL", string password = "")
+    public async Task<int> SaveConnectionAsync(string server, int port, string databaseName, string authType, string username, DatabaseType databaseType = DatabaseType.MSSQL, string password = "")
     {
         try
         {
             await InitializeAsync();
             await using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync();
+
+            string dbTypeStr = databaseType.ToDialectString();
 
             // Check if connection with same server, port, database and type already exists
             const string findSql = @"
@@ -867,12 +890,12 @@ public class DatabaseStorageService
                 server = server ?? "localhost",
                 port,
                 databaseName = databaseName ?? "master",
-                databaseType = databaseType ?? "MSSQL"
+                databaseType = dbTypeStr
             });
 
             if (existingId > 0)
             {
-                await UpdateConnectionAsync(existingId, server ?? string.Empty, port, databaseName ?? string.Empty, authType ?? string.Empty, username ?? string.Empty, databaseType ?? string.Empty, password ?? string.Empty);
+                await UpdateConnectionAsync(existingId, server ?? string.Empty, port, databaseName ?? string.Empty, authType ?? string.Empty, username ?? string.Empty, databaseType, password ?? string.Empty);
                 lock (_connsLock)
                 {
                     _cachedRecentConnections = null;
@@ -893,7 +916,7 @@ public class DatabaseStorageService
                 authType = authType ?? "SQL Server Authentication",
                 username = username ?? string.Empty,
                 password = password ?? string.Empty,
-                databaseType = databaseType ?? "MSSQL"
+                databaseType = dbTypeStr
             });
 
             lock (_connsLock)
@@ -909,7 +932,7 @@ public class DatabaseStorageService
         }
     }
 
-    public async Task<bool> UpdateConnectionAsync(int id, string server, int port, string databaseName, string authType, string username, string databaseType = "MSSQL", string password = "")
+    public async Task<bool> UpdateConnectionAsync(int id, string server, int port, string databaseName, string authType, string username, DatabaseType databaseType = DatabaseType.MSSQL, string password = "")
     {
         try
         {
@@ -935,7 +958,7 @@ public class DatabaseStorageService
                 authType = authType ?? "SQL Server Authentication",
                 username = username ?? string.Empty,
                 password = password ?? string.Empty,
-                databaseType = databaseType ?? "MSSQL"
+                databaseType = databaseType.ToDialectString()
             });
 
             lock (_connsLock)
@@ -1366,7 +1389,7 @@ public class DatabaseStorageService
         var record = new TableCustomizationRecord();
         try
         {
-            string rhStr = await GetSettingAsync("TableRowHeight", "25");
+            string rhStr = await GetSettingAsync("TableRowHeight", "20");
             if (double.TryParse(rhStr, System.Globalization.CultureInfo.InvariantCulture, out double rh))
             {
                 record.RowHeight = rh;
